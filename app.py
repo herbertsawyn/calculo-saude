@@ -11,13 +11,11 @@ import os
 
 st.set_page_config(page_title="SaaS - Revisão Plano de Saúde", layout="wide")
 
-# --- MEMÓRIA DO SISTEMA (Para o preenchimento automático) ---
 if 'parte_autora' not in st.session_state: st.session_state.parte_autora = ""
 if 'valor_inicial' not in st.session_state: st.session_state.valor_inicial = 0.0
 if 'df_valores_iniciais' not in st.session_state: 
     st.session_state.df_valores_iniciais = pd.DataFrame({"Mês/Ano (MM/AAAA)": [""], "Valor Cobrado (R$)": [0.0]})
 
-# --- FUNÇÕES DE DADOS E CÁLCULOS ---
 @st.cache_data(ttl=86400)
 def obter_fipe_saude():
     url = "https://api.bcb.gov.br/dados/serie/bcdata.sgs.7473/dados?formato=json"
@@ -78,7 +76,7 @@ def calcular_revisao_automatica(data_inicio, data_fim, data_nasc, valor_inicial,
         
         if chave_mes_ano in dict_valores_informados:
             novo_valor = dict_valores_informados[chave_mes_ano]
-            if novo_valor > 0 and abs(novo_valor - valor_cobrado) > 0.05: # margem para evitar erro de centavos
+            if novo_valor > 0 and abs(novo_valor - valor_cobrado) > 0.05: 
                 perc_cobrado_real = (novo_valor / valor_cobrado) - 1
                 valor_cobrado = novo_valor
                 
@@ -151,20 +149,27 @@ with st.sidebar:
             with st.spinner("A IA está lendo os documentos..."):
                 try:
                     genai.configure(api_key=api_key)
-                    modelo = genai.GenerativeModel("gemini-1.5-flash-latest")
+                    
+                    # CAÇADOR AUTOMÁTICO DE IAs
+                    # Ele pergunta ao Google qual modelo está disponível e escolhe o correto.
+                    nome_modelo_ia = "gemini-1.5-flash" # Fallback
+                    for m in genai.list_models():
+                        if 'generateContent' in m.supported_generation_methods and '1.5-flash' in m.name:
+                            nome_modelo_ia = m.name.replace("models/", "")
+                            break
+                            
+                    modelo = genai.GenerativeModel(nome_modelo_ia)
                     
                     arquivos_para_ia = []
                     for arquivo in arquivos_enviados:
-                        # Salva o arquivo temporariamente para a IA ler
                         with tempfile.NamedTemporaryFile(delete=False, suffix=f".{arquivo.name.split('.')[-1]}") as temp_file:
                             temp_file.write(arquivo.read())
                             temp_file_path = temp_file.name
                         
                         arq_subido = genai.upload_file(temp_file_path)
                         arquivos_para_ia.append(arq_subido)
-                        os.unlink(temp_file_path) # Limpa o arquivo temp
+                        os.unlink(temp_file_path)
                     
-                    # O Comando Invisível que enviamos para a IA
                     prompt_ia = """
                     Você é um perito financeiro analisando faturas de plano de saúde.
                     Extraia os seguintes dados dos documentos anexados:
@@ -185,27 +190,23 @@ with st.sidebar:
                     
                     resposta_ia = modelo.generate_content([prompt_ia] + arquivos_para_ia)
                     
-                    # Limpa os arquivos da memória do Google
                     for a in arquivos_para_ia: genai.delete_file(a.name)
                     
-                    # Extrai o texto limpo (removendo aspas do markdown se tiver)
                     texto_json = resposta_ia.text.replace("```json", "").replace("```", "").strip()
                     dados_extraidos = json.loads(texto_json)
                     
-                    # Atualiza a Memória do Sistema para preencher as telas
                     st.session_state.parte_autora = dados_extraidos.get('parte_autora', '')
                     st.session_state.valor_inicial = float(dados_extraidos.get('valor_primeiro_boleto', 0.0))
                     
-                    # Prepara a tabela
                     lista_boletos = dados_extraidos.get('boletos', [])
                     if lista_boletos:
                         df_temp = pd.DataFrame(lista_boletos)
                         df_temp.columns = ["Mês/Ano (MM/AAAA)", "Valor Cobrado (R$)"]
                         st.session_state.df_valores_iniciais = df_temp
                     
-                    st.success("✅ Documentos lidos com sucesso! Os campos foram preenchidos.")
+                    st.success(f"✅ Sucesso! Usando a IA: {nome_modelo_ia}")
                 except Exception as e:
-                    st.error(f"Ocorreu um erro ao processar: {e}")
+                    st.error(f"Erro na IA: {e}")
 
 # --- TELA PRINCIPAL ---
 st.title("⚖️ Sistema Revisional Inteligente - Planos de Saúde")
@@ -215,7 +216,6 @@ if df_fipe_global is not None:
     st.header("1. Dados do Processo")
     col1, col2 = st.columns(2)
     with col1:
-        # Puxando o nome da parte autora direto da IA (da memória)
         parte_autora = st.text_input("Parte Autora", value=st.session_state.parte_autora)
         data_nascimento = st.date_input("Data de Nascimento do Titular", format="DD/MM/YYYY", value=datetime.date(1970, 1, 1))
         data_inicio = st.date_input("Data de Início do Cálculo", format="DD/MM/YYYY")
@@ -223,14 +223,12 @@ if df_fipe_global is not None:
     with col2:
         parte_re = st.text_input("Parte Ré (Ex: CASSI)")
         data_fim = st.date_input("Data Fim do Cálculo", format="DD/MM/YYYY")
-        # Puxando o valor inicial direto da IA
         valor_inicial = st.number_input("Valor Inicial (Primeiro Mês R$)", min_value=0.0, value=st.session_state.valor_inicial, format="%.2f")
         data_base_prescricao = st.date_input("Data para Prescrição (3 anos p/ trás)", format="DD/MM/YYYY", value=datetime.date.today())
 
     st.markdown("---")
     st.header("2. Evolução dos Boletos (Preenchimento Automático ou Manual)")
     
-    # A tabela inicia vazia, mas se a IA leu, ela preenche!
     df_valores_editado = st.data_editor(
         st.session_state.df_valores_iniciais, 
         num_rows="dynamic", 
