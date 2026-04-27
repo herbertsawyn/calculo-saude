@@ -17,19 +17,35 @@ def obter_fipe_saude():
         resposta.raise_for_status()
         df = pd.DataFrame(resposta.json())
         df['data'] = pd.to_datetime(df['data'], format='%d/%m/%Y')
-        df['valor'] = df['valor'].astype(float) / 100 # Converte para decimal (0.0052)
+        df['valor'] = df['valor'].astype(float) / 100 
         df = df.set_index('data')
         return df
     except Exception as e:
         st.error(f"Erro ao obter dados do Banco Central: {e}")
         return None
 
-def calcular_revisao(data_inicio, data_fim, valor_inicial, mes_reajuste, reajustes_plano, df_fipe):
+# Funções de Idade e Faixa Etária
+def calcula_idade(data_nasc, data_ref):
+    return data_ref.year - data_nasc.year - ((data_ref.month, data_ref.day) < (data_nasc.month, data_nasc.day))
+
+def obter_faixa_etaria(idade):
+    if idade <= 18: return 1
+    elif idade <= 23: return 2
+    elif idade <= 28: return 3
+    elif idade <= 33: return 4
+    elif idade <= 38: return 5
+    elif idade <= 43: return 6
+    elif idade <= 48: return 7
+    elif idade <= 53: return 8
+    elif idade <= 58: return 9
+    else: return 10
+
+def calcular_revisao(data_inicio, data_fim, data_nasc, valor_inicial, mes_reajuste, reajustes_plano_anual, reajustes_idade_cobrado, reajustes_idade_devido, df_fipe):
     meses_calculo = []
     
-    # Força os dias para o dia 1 do mês para facilitar a busca do índice
     data_atual = pd.to_datetime(data_inicio).replace(day=1)
     data_fim_calc = pd.to_datetime(data_fim)
+    data_nasc_dt = pd.to_datetime(data_nasc)
     
     valor_devido = valor_inicial
     valor_cobrado = valor_inicial
@@ -39,45 +55,63 @@ def calcular_revisao(data_inicio, data_fim, valor_inicial, mes_reajuste, reajust
         mes_atual = data_atual.month
         
         perc_fipe_acumulado = 0.0
-        perc_plano = 0.0
+        perc_plano_anual = 0.0
+        perc_idade_cobr = 0.0
+        perc_idade_dev = 0.0
+        mudou_faixa = "Não"
         
-        # Só reajusta no mês de aniversário E se já passou do primeiro ano
+        idade_atual = calcula_idade(data_nasc_dt, data_atual)
+        data_mes_anterior = data_atual - relativedelta(months=1)
+        idade_anterior = calcula_idade(data_nasc_dt, data_mes_anterior)
+        
+        faixa_atual = obter_faixa_etaria(idade_atual)
+        faixa_anterior = obter_faixa_etaria(idade_anterior)
+        
+        valor_anterior_cobrado = valor_cobrado
+        valor_anterior_devido = valor_devido
+        
+        # 1. GATILHO DE FAIXA ETÁRIA (Aniversário e Mudança de Faixa)
+        if faixa_atual > faixa_anterior:
+            # Trava do Estatuto do Idoso: Sem reajuste se idade >= 60
+            if idade_atual < 60:
+                perc_idade_cobr = reajustes_idade_cobrado.get(faixa_atual, 0.0)
+                perc_idade_dev = reajustes_idade_devido.get(faixa_atual, 0.0)
+                mudou_faixa = f"Sim (Faixa {faixa_atual})"
+            else:
+                mudou_faixa = "Bloqueado (Idoso >=60)"
+
+        # 2. GATILHO DE REAJUSTE ANUAL (Aniversário do Contrato)
         if mes_atual == mes_reajuste and data_atual > pd.to_datetime(data_inicio):
-            # Calcula a Janela de 12 meses
-            # Fim da janela: 2 meses antes do reajuste
             fim_janela = data_atual - relativedelta(months=2)
-            # Início da janela: 13 meses antes do reajuste (para pegar 12 meses inteiros)
             inicio_janela = data_atual - relativedelta(months=13)
-            
             fim_janela = fim_janela.replace(day=1)
             inicio_janela = inicio_janela.replace(day=1)
             
-            # Filtra os índices nesse período
             mask = (df_fipe.index >= inicio_janela) & (df_fipe.index <= fim_janela)
             dados_janela = df_fipe.loc[mask, 'valor']
             
             if len(dados_janela) > 0:
-                # Multiplicação de Fatores (Ex: 1.0052 * 1.0148...)
                 fatores = 1 + dados_janela
                 perc_fipe_acumulado = fatores.prod() - 1
-            else:
-                perc_fipe_acumulado = 0.0
                 
-            # Busca o reajuste do plano introduzido pelo usuário (já vem em decimal)
-            perc_plano = reajustes_plano.get(ano_atual, 0.0)
+            perc_plano_anual = reajustes_plano_anual.get(ano_atual, 0.0)
             
-            # Aplica os reajustes
-            valor_devido = valor_devido * (1 + perc_fipe_acumulado)
-            valor_cobrado = valor_cobrado * (1 + perc_plano)
-            
+        # Aplica os reajustes (Anual + Idade)
+        valor_devido = valor_devido * (1 + perc_fipe_acumulado) * (1 + perc_idade_dev)
+        valor_cobrado = valor_cobrado * (1 + perc_plano_anual) * (1 + perc_idade_cobr)
+        
         diferenca = valor_cobrado - valor_devido
         
         meses_calculo.append({
-            'PERIODO_DT': data_atual, # Usado para cálculos internos e filtros
-            'PERIODO': data_atual.strftime('%d/%m/%Y'), # Formato BR
+            'PERIODO_DT': data_atual,
+            'PERIODO': data_atual.strftime('%d/%m/%Y'),
+            'IDADE': idade_atual,
+            'VALOR ANTERIOR COBRADO': valor_anterior_cobrado,
+            'MUDOU FAIXA': mudou_faixa,
+            '% FAIXA ETÁRIA (COBRADO)': perc_idade_cobr,
             '% FIPE SAUDE': perc_fipe_acumulado,
+            '% DO PLANO ANUAL': perc_plano_anual,
             'VALOR DEVIDO': valor_devido,
-            '% DO PLANO': perc_plano,
             'VALOR COBRADO': valor_cobrado,
             'VALOR PAGO': valor_cobrado,
             'DIFERENÇA': diferenca
@@ -89,54 +123,91 @@ def calcular_revisao(data_inicio, data_fim, valor_inicial, mes_reajuste, reajust
 
 # --- INTERFACE DO UTILIZADOR (FRONTEND) ---
 st.title("⚖️ Sistema de Cálculos Revisionais - Planos de Saúde")
-st.markdown("Plataforma SaaS para substituição do índice aplicado pelo **IPC-Fipe Saúde**.")
+st.markdown("Plataforma SaaS para substituição do índice aplicado pelo **IPC-Fipe Saúde** com validação de Faixa Etária.")
 
 df_fipe_global = obter_fipe_saude()
 
 if df_fipe_global is not None:
-    st.sidebar.success("✅ Dados Fipe Saúde do Banco Central sincronizados!")
-    
-    st.header("1. Dados do Processo")
+    st.header("1. Dados do Processo e Beneficiário")
     col1, col2 = st.columns(2)
     with col1:
         parte_autora = st.text_input("Parte Autora")
-        data_inicio = st.date_input("Data de Início do Cálculo")
-        mes_reajuste = st.number_input("Mês de Reajuste (Aniversário)", min_value=1, max_value=12, value=7)
+        data_nascimento = st.date_input("Data de Nascimento do Titular", format="DD/MM/YYYY", value=datetime.date(1970, 1, 1))
+        data_inicio = st.date_input("Data de Início do Cálculo", format="DD/MM/YYYY")
+        mes_reajuste = st.number_input("Mês de Reajuste (Aniversário Contrato)", min_value=1, max_value=12, value=7)
     with col2:
         parte_re = st.text_input("Parte Ré (Ex: CASSI)")
-        data_fim = st.date_input("Data Fim do Cálculo")
+        data_fim = st.date_input("Data Fim do Cálculo", format="DD/MM/YYYY")
         valor_inicial = st.number_input("Valor Inicial da Mensalidade (R$)", min_value=0.0, value=721.99, format="%.2f")
-        
-    st.markdown("---")
-    st.header("2. Prescrição Trienal")
-    st.markdown("A restituição (indébito) considerará apenas os pagamentos a maior dos **últimos 3 anos** contados a partir da data abaixo (geralmente a data de distribuição da ação ou a data de hoje).")
-    data_base_prescricao = st.date_input("Data para contagem de 3 anos para trás", value=datetime.date.today())
+        data_base_prescricao = st.date_input("Data base para Prescrição (3 anos p/ trás)", format="DD/MM/YYYY", value=datetime.date.today())
 
     st.markdown("---")
-    st.header("3. Reajustes Aplicados pelo Plano")
-    st.markdown("Digite os percentuais aplicados (Ex: Para **12,87%**, digite apenas **12.87**)")
+    st.header("2. Reajustes por Faixa Etária (Evolução)")
+    st.markdown("Insira os percentuais **cobrados pelo plano** e os **permitidos (devidos)**. O sistema fará a validação de compliance (Resolução 63/03).")
     
-    reajustes_plano = {}
+    reajustes_idade_cobrado = {}
+    reajustes_idade_devido = {}
+    
+    faixas = [
+        (2, "19 a 23 anos"), (3, "24 a 28 anos"), (4, "29 a 33 anos"),
+        (5, "34 a 38 anos"), (6, "39 a 43 anos"), (7, "44 a 48 anos"),
+        (8, "49 a 53 anos"), (9, "54 a 58 anos"), (10, "59 anos ou mais")
+    ]
+    
+    # Criando colunas para a tabela de inserção de Idade
+    col_f1, col_f2, col_f3 = st.columns(3)
+    for idx, (faixa_id, label) in enumerate(faixas):
+        col_atual = [col_f1, col_f2, col_f3][idx % 3]
+        with col_atual:
+            st.markdown(f"**{label}**")
+            cobr = st.number_input(f"% Cobrado ({label})", min_value=0.0, value=0.0, format="%.2f", key=f"c_{faixa_id}")
+            dev = st.number_input(f"% Legal/Devido ({label})", min_value=0.0, value=0.0, format="%.2f", key=f"d_{faixa_id}")
+            if cobr > 0: reajustes_idade_cobrado[faixa_id] = cobr / 100
+            if dev > 0: reajustes_idade_devido[faixa_id] = dev / 100
+            st.markdown("")
+
+    # MÓDULO DE COMPLIANCE (Validação das Travas ANS)
+    st.subheader("🛡️ Análise de Legalidade (Travas da ANS)")
+    preco_proj = {1: 1.0}
+    for f in range(2, 11):
+        preco_proj[f] = preco_proj[f-1] * (1 + reajustes_idade_cobrado.get(f, 0.0))
+    
+    regra_6x_ok = preco_proj[10] <= (preco_proj[1] * 6.0001)
+    var_10_7 = preco_proj[10] / preco_proj[7] if 7 in preco_proj else 0
+    var_7_1 = preco_proj[7] / preco_proj[1] if 7 in preco_proj else 0
+    regra_acumulada_ok = var_10_7 <= (var_7_1 + 0.0001)
+
+    if not regra_6x_ok or not regra_acumulada_ok:
+        st.error("🚨 ATENÇÃO: Os percentuais cobrados pelo plano violam as regras da ANS!")
+        if not regra_6x_ok:
+            st.write("- **Falha na Trava de Amplitude:** A última faixa (59+) está superando em mais de 6x o valor da primeira faixa.")
+        if not regra_acumulada_ok:
+            st.write(f"- **Falha na Trava Acumulada:** A variação das faixas 7 a 10 ({var_10_7:.2f}x) é maior que a variação das faixas 1 a 7 ({var_7_1:.2f}x).")
+    else:
+        st.success("✅ Os percentuais de idade informados estão dentro das travas da ANS.")
+
+    st.markdown("---")
+    st.header("3. Reajustes Anuais (Aplicados pelo Plano)")
+    
+    reajustes_plano_anual = {}
     anos_range = range(data_inicio.year, data_fim.year + 1)
-    
-    # Cria inputs dinâmicos para os anos
     cols = st.columns(min(len(anos_range), 4))
     for i, ano in enumerate(anos_range):
         with cols[i % 4]:
-            val = st.number_input(f"Reajuste Plano - {ano} (%)", min_value=0.0, value=0.0, format="%.2f")
+            val = st.number_input(f"Reajuste Anual - {ano} (%)", min_value=0.0, value=0.0, format="%.2f")
             if val > 0:
-                reajustes_plano[ano] = val / 100 # Divide por 100 para o cálculo matemático interno
+                reajustes_plano_anual[ano] = val / 100
 
     st.markdown("---")
-    if st.button("Gerar Cálculo Revisional", type="primary", use_container_width=True):
-        with st.spinner('Construindo a janela de 12 meses e cruzando dados do Banco Central...'):
+    if st.button("Gerar Cálculo Revisional Completo", type="primary", use_container_width=True):
+        with st.spinner('Processando Fipe Saúde, Idades e Travas...'):
             df_raw = calcular_revisao(
-                data_inicio, data_fim, valor_inicial, mes_reajuste, reajustes_plano, df_fipe_global
+                data_inicio, data_fim, data_nascimento, valor_inicial, mes_reajuste, 
+                reajustes_plano_anual, reajustes_idade_cobrado, reajustes_idade_devido, df_fipe_global
             )
             
             # --- CÁLCULO DA RESTITUIÇÃO (ÚLTIMOS 3 ANOS) ---
             limite_3_anos = pd.to_datetime(data_base_prescricao) - relativedelta(years=3)
-            # Filtra apenas as linhas onde a data do período é MAIOR ou IGUAL a exatos 3 anos atrás
             df_restituicao = df_raw[df_raw['PERIODO_DT'] >= limite_3_anos]
             
             if not df_restituicao.empty:
@@ -149,7 +220,6 @@ if df_fipe_global is not None:
                 soma_cobrado = soma_devido = soma_diferenca = 0
                 mes_inicio_resumo = mes_fim_resumo = "N/A"
 
-            # --- SEÇÃO: RESUMO DOS CÁLCULOS ---
             st.success("Cálculo gerado com sucesso!")
             st.subheader("📊 Resumo de Restituição")
             st.markdown(f"**Período Apurado (Prescrição Trienal):** {mes_inicio_resumo} a {mes_fim_resumo}")
@@ -162,22 +232,20 @@ if df_fipe_global is not None:
             st.markdown("---")
             st.subheader("Detalhamento Mês a Mês")
             
-            # Formata os dados APENAS para exibir bonito na tela e no Excel
             df_display = df_raw.copy()
-            df_display.drop(columns=['PERIODO_DT'], inplace=True) # Esconde a coluna de data interna
+            df_display.drop(columns=['PERIODO_DT'], inplace=True) 
             
-            # Transforma os números em textos formatados como "12,87%" 
+            # Formatação de Percetuais
             df_display['% FIPE SAUDE'] = df_display['% FIPE SAUDE'].apply(lambda x: f"{x*100:,.2f}%".replace('.', ',') if x > 0 else "")
-            df_display['% DO PLANO'] = df_display['% DO PLANO'].apply(lambda x: f"{x*100:,.2f}%".replace('.', ',') if x > 0 else "")
+            df_display['% DO PLANO ANUAL'] = df_display['% DO PLANO ANUAL'].apply(lambda x: f"{x*100:,.2f}%".replace('.', ',') if x > 0 else "")
+            df_display['% FAIXA ETÁRIA (COBRADO)'] = df_display['% FAIXA ETÁRIA (COBRADO)'].apply(lambda x: f"{x*100:,.2f}%".replace('.', ',') if x > 0 else "")
             
-            # Arredonda e formata os valores em dinheiro
-            for col in ['VALOR DEVIDO', 'VALOR COBRADO', 'VALOR PAGO', 'DIFERENÇA']:
+            # Formatação de Valores
+            for col in ['VALOR ANTERIOR COBRADO', 'VALOR DEVIDO', 'VALOR COBRADO', 'VALOR PAGO', 'DIFERENÇA']:
                 df_display[col] = df_display[col].apply(lambda x: f"{x:,.2f}".replace(',', 'X').replace('.', ',').replace('X', '.'))
 
-            # Mostra a tabela na tela
             st.dataframe(df_display, use_container_width=True)
             
-            # Prepara a exportação para Excel
             output = BytesIO()
             with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
                 df_display.to_excel(writer, index=False, sheet_name='Cálculo Revisional')
