@@ -25,6 +25,11 @@ if 'data_inicio' not in st.session_state: st.session_state.data_inicio = datetim
 if 'df_valores_iniciais' not in st.session_state: 
     st.session_state.df_valores_iniciais = pd.DataFrame({"Mês/Ano (MM/AAAA)": [""], "Valor Cobrado (R$)": [0.0]})
 
+# Inicia as caixinhas de faixa etária na memória para não dar erro
+for f_id in range(2, 11):
+    if f'd_{f_id}' not in st.session_state:
+        st.session_state[f'd_{f_id}'] = 0.0
+
 @st.cache_data(ttl=86400)
 def obter_fipe_saude():
     url = "https://api.bcb.gov.br/dados/serie/bcdata.sgs.7473/dados?formato=json"
@@ -124,7 +129,7 @@ def calcular_revisao_automatica(data_inicio, data_fim, data_nasc, valor_inicial,
         
         meses_calculo.append({
             'PERIODO_DT': data_atual,
-            'PERIODO [1]': data_atual.strftime('%b/%y').lower(), # Formato fev/16
+            'PERIODO [1]': data_atual.strftime('%b/%y').lower(),
             '% FIPE SAUDE [2]': perc_fipe_acumulado,
             'VALOR DEVIDO [3]': valor_devido,
             '% DO PLANO [4]': perc_cobrado_real,
@@ -153,7 +158,9 @@ with st.sidebar:
                 try:
                     genai.configure(api_key=api_key)
                     modelos = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
-                    nome_modelo = next((m for termo in ["gemini-2", "gemini-1.5", "gemini-flash"] for m in modelos if termo in m), modelos[0])
+                    
+                    # Priorizando o 1.5 para não estourar o limite da conta gratuita
+                    nome_modelo = next((m for termo in ["gemini-1.5-flash", "gemini-2", "gemini-flash"] for m in modelos if termo in m), modelos[0])
                     modelo = genai.GenerativeModel(nome_modelo.replace("models/", ""))
                     
                     conteudo = [f"Extraia os dados. Instruções: {texto_ia}\nDevolva JSON: {{\"parte_autora\": \"\", \"data_nascimento\": \"DD/MM/AAAA\", \"data_inicio\": \"DD/MM/AAAA\", \"valor_primeiro_boleto\": 100.0, \"boletos\": [{{\"mes_ano\": \"MM/AAAA\", \"valor\": 150.0}}]}}"]
@@ -185,13 +192,36 @@ with st.sidebar:
                     st.success("✅ IA processou os dados!")
                 except Exception as e: st.error(f"Erro IA: {e}")
 
+# --- FUNÇÃO QUE INJETA OS PERCENTUAIS CASSI NA MEMÓRIA ---
+def aplicar_tabela_cassi():
+    if "CASSI" in st.session_state.tipo_contrato_select:
+        st.session_state['d_2'] = 2.34
+        st.session_state['d_3'] = 5.71
+        st.session_state['d_4'] = 31.37
+        st.session_state['d_5'] = 6.75
+        st.session_state['d_6'] = 12.47
+        st.session_state['d_7'] = 43.55
+        st.session_state['d_8'] = 14.42
+        st.session_state['d_9'] = 27.72
+        st.session_state['d_10'] = 67.57
+    else:
+        # Se escolher "OUTROS", zera os campos para você digitar manualmente
+        for f_id in range(2, 11):
+            st.session_state[f'd_{f_id}'] = 0.0
+
 # --- TELA PRINCIPAL ---
 st.title("⚖️ Sistema Revisional - HSA Advogados")
 df_fipe_global = obter_fipe_saude()
 
 if df_fipe_global is not None:
     st.header("1. Dados do Processo e Contrato")
-    tipo_contrato = st.selectbox("Tipo de Contrato:", ["OUTROS", "CASSI FAMÍLIA I", "CASSI FAMÍLIA II"])
+    
+    tipo_contrato = st.selectbox(
+        "Tipo de Contrato:", 
+        ["OUTROS", "CASSI FAMÍLIA I", "CASSI FAMÍLIA II"],
+        key="tipo_contrato_select",
+        on_change=aplicar_tabela_cassi
+    )
     
     col1, col2 = st.columns(2)
     with col1:
@@ -209,17 +239,17 @@ if df_fipe_global is not None:
     df_valores_editado = st.data_editor(st.session_state.df_valores_iniciais, num_rows="dynamic", use_container_width=True, column_config={"Valor Cobrado (R$)": st.column_config.NumberColumn("Valor Cobrado (R$)", format="R$ %.2f", min_value=0.0)})
 
     st.header("3. Parâmetros Legais (Devido)")
-    padroes_idade = {2: 0.0, 3: 0.0, 4: 0.0, 5: 0.0, 6: 0.0, 7: 0.0, 8: 0.0, 9: 0.0, 10: 0.0}
     if "CASSI" in tipo_contrato:
-        padroes_idade = {2: 2.34, 3: 5.71, 4: 31.37, 5: 6.75, 6: 12.47, 7: 43.55, 8: 14.42, 9: 27.72, 10: 67.57}
-        st.info(f"Percentuais {tipo_contrato} carregados.")
+        st.info(f"Percentuais {tipo_contrato} carregados automaticamente.")
 
     reajustes_idade_devido = {}
     faixas = [(2, "19 a 23"), (3, "24 a 28"), (4, "29 a 33"), (5, "34 a 38"), (6, "39 a 43"), (7, "44 a 48"), (8, "49 a 53"), (9, "54 a 58"), (10, "59+")]
     cols_f = st.columns(5)
+    
+    # As caixas agora puxam o valor da memória (st.session_state[f"d_{f_id}"]) automaticamente
     for idx, (f_id, label) in enumerate(faixas):
         with cols_f[idx % 5]:
-            dev = st.number_input(f"{label} (%)", min_value=0.0, value=padroes_idade[f_id], format="%.2f", key=f"d_{f_id}")
+            dev = st.number_input(f"{label} (%)", min_value=0.0, format="%.2f", key=f"d_{f_id}")
             if dev > 0: reajustes_idade_devido[f_id] = dev / 100
 
     if st.button("Gerar Cálculo Revisional", type="primary", use_container_width=True):
@@ -234,7 +264,6 @@ if df_fipe_global is not None:
             soma_devido = df_restituicao['VALOR DEVIDO [3]'].sum() if not df_restituicao.empty else 0
             soma_diferenca = df_restituicao['DIFERENÇA [8]'].sum() if not df_restituicao.empty else 0
 
-            # --- ABAS DE EXIBIÇÃO ---
             aba_resumo, aba_detalhada = st.tabs(["📄 Resumo de Restituição", "📊 Planilha Completa"])
             
             with aba_resumo:
@@ -261,7 +290,6 @@ if df_fipe_global is not None:
                 df_display = df_raw.copy().drop(columns=['PERIODO_DT'])
                 st.dataframe(df_display, use_container_width=True)
                 
-                # --- EXPORTAÇÃO EXCEL NATIVA (Idêntica ao Modelo) ---
                 output = BytesIO()
                 with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
                     workbook = writer.book
@@ -271,7 +299,6 @@ if df_fipe_global is not None:
                     money_fmt = workbook.add_format({'num_format': 'R$ #,##0.00'})
                     perc_fmt = workbook.add_format({'num_format': '0.00%'})
                     
-                    # Cabeçalho exato
                     worksheet.write('A1', 'PLANILHA DE CALCULO', bold_fmt)
                     worksheet.write('A3', 'PARTE AUTORA')
                     worksheet.write('D3', parte_autora)
@@ -279,17 +306,15 @@ if df_fipe_global is not None:
                     worksheet.write('D4', parte_re)
                     worksheet.write('A6', f'PLANILHA DE CÁLCULOS - {parte_autora.upper()}', bold_fmt)
                     
-                    # Colunas da tabela
                     colunas = df_display.columns.tolist()
                     for col_num, value in enumerate(colunas):
                         worksheet.write(7, col_num, value, bold_fmt)
                         
-                    # Preenchendo os dados com formato NÚMERICO real para o Excel
                     for row_num, row_data in enumerate(df_display.values):
                         for col_num, cell_data in enumerate(row_data):
-                            if col_num in [1, 3]: # Colunas de Percentual
+                            if col_num in [1, 3]: 
                                 worksheet.write(row_num + 8, col_num, cell_data, perc_fmt)
-                            elif col_num in [2, 4, 6, 7]: # Colunas Monetárias
+                            elif col_num in [2, 4, 6, 7]: 
                                 worksheet.write(row_num + 8, col_num, cell_data, money_fmt)
                             else:
                                 worksheet.write(row_num + 8, col_num, cell_data)
@@ -297,7 +322,6 @@ if df_fipe_global is not None:
                     worksheet.set_column('A:A', 15)
                     worksheet.set_column('B:I', 20)
                     
-                    # Bloco Final de Resumo (Igual ao PDF/CSV)
                     last_row = 7 + len(df_display)
                     if not df_restituicao.empty:
                         worksheet.write(last_row + 2, 3, f"OS VALORES DO TOTAL CORRESPONDEM AO PERIODO DE {ano_ini} A {ano_fim_res}", bold_fmt)
