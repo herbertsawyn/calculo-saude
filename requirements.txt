@@ -3,3 +3,5 @@ pandas
 requests
 xlsxwriter
 openpyxl
+python-dateutil
+google-generativeai
