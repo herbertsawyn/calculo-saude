@@ -302,3 +302,4 @@ if df_fipe_global is not None:
             with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
                 df_display.to_excel(writer, index=False, sheet_name='Calculo Revisional')
             st.download_button("📥 Baixar Excel", data=output.getvalue(), file_name=f"Revisional_{parte_autora}.xlsx")
+            
