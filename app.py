@@ -8,6 +8,13 @@ import google.generativeai as genai
 import json
 import tempfile
 import os
+import locale
+
+# Tenta colocar as datas em português para o Resumo
+try:
+    locale.setlocale(locale.LC_TIME, 'pt_BR.utf8')
+except:
+    pass
 
 st.set_page_config(page_title="SaaS - Revisão Plano de Saúde", layout="wide")
 
@@ -119,16 +126,15 @@ def calcular_revisao_automatica(data_inicio, data_fim, data_nasc, valor_inicial,
         
         meses_calculo.append({
             'PERIODO_DT': data_atual,
-            'PERIODO': data_atual.strftime('%d/%m/%Y'),
-            'IDADE': idade_atual,
-            'VALOR ANT. COBRADO': valor_anterior_cobrado,
-            'MOTIVO AUMENTO PLANO': motivo_reajuste,
-            '% APLICADO PLANO': perc_cobrado_real,
-            '% FIPE (LEGAL)': perc_fipe_acumulado,
-            '% FAIXA (LEGAL)': perc_idade_dev,
-            'VALOR DEVIDO': valor_devido,
-            'VALOR COBRADO': valor_cobrado,
-            'DIFERENÇA': diferenca
+            'PERIODO [1]': data_atual.strftime('%Y-%m-%d'),
+            '% FIPE SAUDE [2]': perc_fipe_acumulado,
+            'VALOR DEVIDO [3]': valor_devido,
+            '% DO PLANO [4]': perc_cobrado_real,
+            'VALOR COBRADO [5]': valor_cobrado,
+            'SUSPENÇÃO DE REAJUSTE [6]': 0,
+            'VALOR PAGO [7]': valor_cobrado,
+            'DIFERENÇA [8]': diferenca,
+            'OBSERVAÇÃO': motivo_reajuste
         })
         
         data_atual += relativedelta(months=1)
@@ -169,12 +175,10 @@ with st.sidebar:
                     modelo = genai.GenerativeModel(nome_modelo_ia.replace("models/", ""))
                     
                     conteudo_para_ia = []
-                    
-                    # 1. Adiciona o texto do chat
                     prompt_ia = f"""
-                    Você é um perito financeiro do escritório HSA Advogados analisando dados de plano de saúde.
+                    Você é um perito financeiro analisando dados de plano de saúde.
                     Extraia os dados dos documentos anexados E/OU das instruções em texto abaixo:
-                    INSTRUÇÕES DE TEXTO DO USUÁRIO: "{texto_ia}"
+                    INSTRUÇÕES: "{texto_ia}"
                     
                     Devolva APENAS um objeto JSON no formato exato abaixo, sem markdown:
                     {{
@@ -186,32 +190,25 @@ with st.sidebar:
                         {{"mes_ano": "01/2022", "valor": 1500.50}}
                       ]
                     }}
-                    Se não encontrar datas, devolva null nos campos de data.
                     """
                     conteudo_para_ia.append(prompt_ia)
                     
-                    # 2. Adiciona os arquivos
                     arquivos_temporarios = []
                     for arquivo in arquivos_enviados:
                         with tempfile.NamedTemporaryFile(delete=False, suffix=f".{arquivo.name.split('.')[-1]}") as temp_file:
                             temp_file.write(arquivo.read())
                             temp_file_path = temp_file.name
-                        
                         arq_subido = genai.upload_file(temp_file_path)
                         conteudo_para_ia.append(arq_subido)
                         arquivos_temporarios.append(arq_subido)
                         os.unlink(temp_file_path)
                     
-                    # Gera a resposta
                     resposta_ia = modelo.generate_content(conteudo_para_ia)
-                    
-                    # Limpeza
                     for a in arquivos_temporarios: genai.delete_file(a.name)
                     
                     texto_json = resposta_ia.text.replace("```json", "").replace("```", "").strip()
                     dados_extraidos = json.loads(texto_json)
                     
-                    # Preenche os campos
                     if dados_extraidos.get('parte_autora'): st.session_state.parte_autora = dados_extraidos['parte_autora']
                     if dados_extraidos.get('valor_primeiro_boleto'): st.session_state.valor_inicial = float(dados_extraidos['valor_primeiro_boleto'])
                     
@@ -237,7 +234,14 @@ st.title("⚖️ Sistema Revisional Inteligente - Planos de Saúde")
 df_fipe_global = obter_fipe_saude()
 
 if df_fipe_global is not None:
-    st.header("1. Dados do Processo")
+    st.header("1. Dados do Processo e Contrato")
+    
+    # NOVA OPÇÃO: TIPO DE CONTRATO
+    tipo_contrato = st.selectbox(
+        "Selecione o Tipo de Contrato (Isso preencherá os reajustes de faixa etária automaticamente):",
+        ["OUTROS", "CASSI FAMÍLIA I", "CASSI FAMÍLIA II"]
+    )
+    
     col1, col2 = st.columns(2)
     with col1:
         parte_autora = st.text_input("Parte Autora", value=st.session_state.parte_autora)
@@ -245,13 +249,13 @@ if df_fipe_global is not None:
         data_inicio = st.date_input("Data de Início do Cálculo", format="DD/MM/YYYY", value=st.session_state.data_inicio, min_value=datetime.date(1990, 1, 1), max_value=datetime.date.today())
         mes_reajuste = st.number_input("Mês de Reajuste (Aniversário Contrato)", min_value=1, max_value=12, value=7)
     with col2:
-        parte_re = st.text_input("Parte Ré (Ex: CASSI)")
+        parte_re = st.text_input("Parte Ré", value="CASSI - CAIXA DE ASSISTENCIA DOS FUNCIONARIOS" if "CASSI" in tipo_contrato else "")
         data_fim = st.date_input("Data Fim do Cálculo", format="DD/MM/YYYY", min_value=datetime.date(1990, 1, 1))
         valor_inicial = st.number_input("Valor Inicial (Primeiro Mês R$)", min_value=0.0, value=st.session_state.valor_inicial, format="%.2f")
-        data_base_prescricao = st.date_input("Data para Prescrição (3 anos p/ trás)", format="DD/MM/YYYY", value=datetime.date.today(), min_value=datetime.date(1990, 1, 1))
+        data_base_prescricao = st.date_input("Data base Prescrição (3 anos p/ trás)", format="DD/MM/YYYY", value=datetime.date.today(), min_value=datetime.date(1990, 1, 1))
 
     st.markdown("---")
-    st.header("2. Evolução dos Boletos (Preenchimento Automático ou Manual)")
+    st.header("2. Evolução dos Boletos (O que o Plano Cobrou)")
     df_valores_editado = st.data_editor(
         st.session_state.df_valores_iniciais, 
         num_rows="dynamic", 
@@ -261,18 +265,28 @@ if df_fipe_global is not None:
 
     st.markdown("---")
     st.header("3. Parâmetros Legais (O que é Devido)")
+    
+    # AUTOPREENCHIMENTO CASSI
+    padroes_idade = {2: 0.0, 3: 0.0, 4: 0.0, 5: 0.0, 6: 0.0, 7: 0.0, 8: 0.0, 9: 0.0, 10: 0.0}
+    if tipo_contrato in ["CASSI FAMÍLIA I", "CASSI FAMÍLIA II"]:
+        padroes_idade = {
+            2: 2.34, 3: 5.71, 4: 31.37, 5: 6.75, 6: 12.47, 
+            7: 43.55, 8: 14.42, 9: 27.72, 10: 67.57
+        }
+        st.info(f"ℹ️ Os percentuais foram preenchidos automaticamente conforme tabela da {tipo_contrato}.")
+
     reajustes_idade_devido = {}
     faixas = [(2, "19 a 23"), (3, "24 a 28"), (4, "29 a 33"), (5, "34 a 38"), (6, "39 a 43"), (7, "44 a 48"), (8, "49 a 53"), (9, "54 a 58"), (10, "59+")]
     
     cols_f = st.columns(5)
     for idx, (faixa_id, label) in enumerate(faixas):
         with cols_f[idx % 5]:
-            dev = st.number_input(f"{label} (%)", min_value=0.0, value=0.0, format="%.2f", key=f"d_{faixa_id}")
+            dev = st.number_input(f"{label} (%)", min_value=0.0, value=padroes_idade[faixa_id], format="%.2f", key=f"d_{faixa_id}")
             if dev > 0: reajustes_idade_devido[faixa_id] = dev / 100
 
     st.markdown("---")
     if st.button("Gerar Cálculo Revisional Completo", type="primary", use_container_width=True):
-        with st.spinner('Gerando perícia atuarial...'):
+        with st.spinner('Gerando perícia atuarial e formatando Excel...'):
             dict_valores = {}
             for index, row in df_valores_editado.iterrows():
                 try:
@@ -294,88 +308,96 @@ if df_fipe_global is not None:
             
             soma_cobrado = soma_devido = soma_diferenca = 0
             if not df_restituicao.empty:
-                soma_cobrado = df_restituicao['VALOR COBRADO'].sum()
-                soma_devido = df_restituicao['VALOR DEVIDO'].sum()
-                soma_diferenca = df_restituicao['DIFERENÇA'].sum()
+                soma_cobrado = df_restituicao['VALOR PAGO [7]'].sum()
+                soma_devido = df_restituicao['VALOR DEVIDO [3]'].sum()
+                soma_diferenca = df_restituicao['DIFERENÇA [8]'].sum()
 
             # --- SISTEMA DE ABAS (RESUMO E PLANILHA) ---
             st.header("4. Resultados Oficiais")
             aba_resumo, aba_detalhada = st.tabs(["📄 Resumo de Restituição", "📊 Planilha Completa (Mês a Mês)"])
             
-            # ABA 1: RESUMO (Estilo da imagem enviada)
             with aba_resumo:
                 st.subheader(f"Resumo de Restituição - {parte_autora}")
                 if not df_restituicao.empty:
                     mes_inicio_res = df_restituicao['PERIODO_DT'].min().strftime('%m/%Y')
                     mes_fim_res = df_restituicao['PERIODO_DT'].max().strftime('%m/%Y')
-                    st.markdown(f"**Período Apurado:** {mes_inicio_res} a {mes_fim_res}")
+                    st.markdown(f"**Período Apurado (Prescrição):** {mes_inicio_res} a {mes_fim_res}")
                 
                 col_res1, col_res2, col_res3 = st.columns(3)
                 col_res1.metric("Valor Pago (Cobrado)", f"R$ {soma_cobrado:,.2f}".replace(',', 'X').replace('.', ',').replace('X', '.'))
                 col_res2.metric("Valor Devido (Legal)", f"R$ {soma_devido:,.2f}".replace(',', 'X').replace('.', ',').replace('X', '.'))
                 col_res3.metric("Total a Restituir (Indébito)", f"R$ {soma_diferenca:,.2f}".replace(',', 'X').replace('.', ',').replace('X', '.'))
                 
-                # Validação ANS
+                # Opcional: Validação ANS
                 st.markdown("---")
-                st.write("**Análise de Legalidade (Res. 63/03 ANS):**")
                 if idades_descobertas:
                     preco_proj = {1: 1.0}
                     for f in range(2, 11): preco_proj[f] = preco_proj[f-1] * (1 + idades_descobertas.get(f, 0.0))
                     if preco_proj[10] > (preco_proj[1] * 6.0001) or (preco_proj[10] / preco_proj[7] if 7 in preco_proj else 0) > ((preco_proj[7] / preco_proj[1] if 7 in preco_proj else 0) + 0.0001):
-                        st.error("🚨 ALERTA: A evolução das faixas etárias cobradas pela operadora quebra os limites matemáticos da ANS.")
+                        st.error("🚨 ALERTA: A evolução cobrada quebra os limites matemáticos da ANS.")
                     else:
-                        st.success("✅ A variação de faixa etária está de acordo com as regras da ANS.")
+                        st.success("✅ A variação de faixa etária cobrada respeita as regras da ANS.")
 
-            # ABA 2: DETALHADA E EXPORTAÇÃO EXCEL
             with aba_detalhada:
+                # Prepara exibição bonitinha na tela
                 df_display = df_raw.copy().drop(columns=['PERIODO_DT'])
-                for col in ['% APLICADO PLANO', '% FIPE (LEGAL)', '% FAIXA (LEGAL)']:
-                    df_display[col] = df_display[col].apply(lambda x: f"{x*100:,.2f}%".replace('.', ',') if x > 0 else "-")
-                for col in ['VALOR ANT. COBRADO', 'VALOR DEVIDO', 'VALOR COBRADO', 'DIFERENÇA']:
+                for col in ['% DO PLANO [4]', '% FIPE SAUDE [2]']:
+                    df_display[col] = df_display[col].apply(lambda x: f"{x*100:,.2f}%".replace('.', ',') if x > 0 else "")
+                for col in ['VALOR DEVIDO [3]', 'VALOR COBRADO [5]', 'VALOR PAGO [7]', 'DIFERENÇA [8]']:
                     df_display[col] = df_display[col].apply(lambda x: f"{x:,.2f}".replace(',', 'X').replace('.', ',').replace('X', '.'))
 
                 st.dataframe(df_display, use_container_width=True)
                 
-                # --- MOTOR DE EXPORTAÇÃO EXCEL PROFISSIONAL (Estilo Modelo) ---
+                # --- EXPORTAÇÃO EXCEL IDENTICA AO MODELO ---
                 output = BytesIO()
                 with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
                     workbook = writer.book
                     worksheet = workbook.add_worksheet('Cálculo Revisional')
                     writer.sheets['Cálculo Revisional'] = worksheet
                     
-                    # Formatadores
                     bold_format = workbook.add_format({'bold': True})
-                    header_format = workbook.add_format({'bold': True, 'bg_color': '#D3D3D3', 'border': 1})
                     
-                    # Cabeçalho da Petição (Com o nome do escritório)
-                    worksheet.write('A1', 'HSA ADVOGADOS - PLANILHA DE CÁLCULO REVISIONAL', bold_format)
-                    worksheet.write('A3', 'PARTE AUTORA:', bold_format)
-                    worksheet.write('B3', parte_autora)
-                    worksheet.write('A4', 'PARTE RÉ:', bold_format)
-                    worksheet.write('B4', parte_re)
+                    # Réplica exata do cabeçalho do modelo CSV enviado
+                    worksheet.write('A1', 'PLANILHA DE CALCULO', bold_format)
+                    worksheet.write('A3', 'PARTE AUTORA')
+                    worksheet.write('D3', parte_autora)
+                    worksheet.write('A4', 'PARTE RÉ')
+                    worksheet.write('D4', parte_re)
                     worksheet.write('A6', f'PLANILHA DE CÁLCULOS - {parte_autora.upper()}', bold_format)
                     
-                    # Escrevendo a tabela de dados
-                    df_display.to_excel(writer, index=False, sheet_name='Cálculo Revisional', startrow=7)
+                    # Removemos a formatação de texto para não estragar as contas matemáticas no Excel
+                    df_excel_puro = df_raw.copy().drop(columns=['PERIODO_DT'])
+                    df_excel_puro.to_excel(writer, index=False, sheet_name='Cálculo Revisional', startrow=7)
                     
-                    # Aplicando estilo na linha de títulos da tabela
-                    for col_num, value in enumerate(df_display.columns.values):
-                        worksheet.write(7, col_num, value, header_format)
+                    # Ajuste de largura das colunas do Excel
+                    worksheet.set_column('A:A', 12)
+                    worksheet.set_column('B:I', 18)
                     
-                    # Ajustando a largura das colunas
-                    worksheet.set_column('A:B', 12)
-                    worksheet.set_column('C:K', 18)
+                    # Linha do TOTAL
+                    last_row = 7 + len(df_excel_puro)
+                    soma_total_diferenca = df_raw['DIFERENÇA [8]'].sum()
+                    worksheet.write(last_row + 1, 0, 'TOTAL', bold_format)
+                    worksheet.write(last_row + 1, 7, soma_total_diferenca, bold_format)
                     
-                    # Inserindo o Quadro de Resumo no final da tabela no Excel
-                    linha_final = 7 + len(df_display) + 3
+                    # Bloco RESUMO (Final da planilha)
                     if not df_restituicao.empty:
-                        worksheet.write(linha_final, 1, 'RESUMO DE RESTITUIÇÃO', bold_format)
-                        worksheet.write(linha_final + 1, 1, 'VALOR PAGO', bold_format)
-                        worksheet.write(linha_final + 1, 2, f"R$ {soma_cobrado:,.2f}".replace(',', 'X').replace('.', ',').replace('X', '.'))
-                        worksheet.write(linha_final + 2, 1, 'VALOR DEVIDO', bold_format)
-                        worksheet.write(linha_final + 2, 2, f"R$ {soma_devido:,.2f}".replace(',', 'X').replace('.', ',').replace('X', '.'))
-                        worksheet.write(linha_final + 3, 1, 'DIFERENÇA (INDÉBITO)', bold_format)
-                        worksheet.write(linha_final + 3, 2, f"R$ {soma_diferenca:,.2f}".replace(',', 'X').replace('.', ',').replace('X', '.'))
+                        mes_inicio_str = df_restituicao['PERIODO_DT'].min().strftime('%B/%Y').upper()
+                        mes_fim_str = df_restituicao['PERIODO_DT'].max().strftime('%B/%Y').upper()
+                        
+                        resumo_row = last_row + 4
+                        worksheet.write(resumo_row, 1, f"RESUMO DE RESTITUIÇÃO {mes_inicio_str} A {mes_fim_str}", bold_format)
+                        
+                        resumo_row += 1
+                        worksheet.write(resumo_row, 1, 'PERIODO EM ANOS', bold_format)
+                        worksheet.write(resumo_row, 4, 'VALORES PAGO', bold_format)
+                        worksheet.write(resumo_row, 6, 'VALORES DEVIDO', bold_format)
+                        worksheet.write(resumo_row, 8, 'DIFERENÇAS', bold_format)
+                        
+                        resumo_row += 1
+                        worksheet.write(resumo_row, 1, 'Últimos 3 Anos')
+                        worksheet.write(resumo_row, 4, soma_cobrado)
+                        worksheet.write(resumo_row, 6, soma_devido)
+                        worksheet.write(resumo_row, 8, soma_diferenca)
 
-                st.download_button("📥 Baixar Excel Organizado", data=output.getvalue(), file_name=f"Calculo_HSA_{parte_autora}.xlsx")
+                st.download_button("📥 Baixar Excel do Modelo Oficial", data=output.getvalue(), file_name=f"Calculo_Oficial_{parte_autora}.xlsx")
                     
