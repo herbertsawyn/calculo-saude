@@ -8,14 +8,12 @@ import google.generativeai as genai
 import json
 import tempfile
 import os
-import locale
-
-try:
-    locale.setlocale(locale.LC_TIME, 'pt_BR.utf8')
-except:
-    pass
 
 st.set_page_config(page_title="HSA Advogados - Revisão de Saúde", layout="wide")
+
+# --- DICIONÁRIOS DE TRADUÇÃO (Blindagem contra meses em inglês) ---
+MESES_ABREV = {1: 'jan', 2: 'fev', 3: 'mar', 4: 'abr', 5: 'mai', 6: 'jun', 7: 'jul', 8: 'ago', 9: 'set', 10: 'out', 11: 'nov', 12: 'dez'}
+MESES_COMPLETO = {1: 'JANEIRO', 2: 'FEVEREIRO', 3: 'MARÇO', 4: 'ABRIL', 5: 'MAIO', 6: 'JUNHO', 7: 'JULHO', 8: 'AGOSTO', 9: 'SETEMBRO', 10: 'OUTUBRO', 11: 'NOVEMBRO', 12: 'DEZEMBRO'}
 
 # --- MEMÓRIA DO SISTEMA ---
 if 'parte_autora' not in st.session_state: st.session_state.parte_autora = ""
@@ -127,9 +125,12 @@ def calcular_revisao_automatica(data_inicio, data_fim, data_nasc, valor_inicial,
         
         diferenca = valor_cobrado - valor_devido
         
+        # Uso do tradutor para o mês
+        periodo_str = f"{MESES_ABREV[data_atual.month]}/{data_atual.strftime('%y')}"
+        
         meses_calculo.append({
             'PERIODO_DT': data_atual,
-            'PERIODO [1]': data_atual.strftime('%b/%y').lower(),
+            'PERIODO [1]': periodo_str,
             '% FIPE SAUDE [2]': perc_fipe_acumulado,
             'VALOR DEVIDO [3]': valor_devido,
             '% DO PLANO [4]': perc_cobrado_real,
@@ -159,7 +160,6 @@ with st.sidebar:
                     genai.configure(api_key=api_key)
                     modelos = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
                     
-                    # Priorizando o 1.5 para não estourar o limite da conta gratuita
                     nome_modelo = next((m for termo in ["gemini-1.5-flash", "gemini-2", "gemini-flash"] for m in modelos if termo in m), modelos[0])
                     modelo = genai.GenerativeModel(nome_modelo.replace("models/", ""))
                     
@@ -192,7 +192,6 @@ with st.sidebar:
                     st.success("✅ IA processou os dados!")
                 except Exception as e: st.error(f"Erro IA: {e}")
 
-# --- FUNÇÃO QUE INJETA OS PERCENTUAIS CASSI NA MEMÓRIA ---
 def aplicar_tabela_cassi():
     if "CASSI" in st.session_state.tipo_contrato_select:
         st.session_state['d_2'] = 2.34
@@ -205,7 +204,6 @@ def aplicar_tabela_cassi():
         st.session_state['d_9'] = 27.72
         st.session_state['d_10'] = 67.57
     else:
-        # Se escolher "OUTROS", zera os campos para você digitar manualmente
         for f_id in range(2, 11):
             st.session_state[f'd_{f_id}'] = 0.0
 
@@ -246,7 +244,6 @@ if df_fipe_global is not None:
     faixas = [(2, "19 a 23"), (3, "24 a 28"), (4, "29 a 33"), (5, "34 a 38"), (6, "39 a 43"), (7, "44 a 48"), (8, "49 a 53"), (9, "54 a 58"), (10, "59+")]
     cols_f = st.columns(5)
     
-    # As caixas agora puxam o valor da memória (st.session_state[f"d_{f_id}"]) automaticamente
     for idx, (f_id, label) in enumerate(faixas):
         with cols_f[idx % 5]:
             dev = st.number_input(f"{label} (%)", min_value=0.0, format="%.2f", key=f"d_{f_id}")
@@ -264,12 +261,22 @@ if df_fipe_global is not None:
             soma_devido = df_restituicao['VALOR DEVIDO [3]'].sum() if not df_restituicao.empty else 0
             soma_diferenca = df_restituicao['DIFERENÇA [8]'].sum() if not df_restituicao.empty else 0
 
+            # --- PREPARAÇÃO DA TABELA PARA A TELA (FORMATADA BONITA) ---
+            df_tela = df_raw.copy().drop(columns=['PERIODO_DT'])
+            for col in ['% FIPE SAUDE [2]', '% DO PLANO [4]']:
+                df_tela[col] = df_tela[col].apply(lambda x: f"{x*100:,.2f}%".replace('.', ',') if x > 0 else "")
+            for col in ['VALOR DEVIDO [3]', 'VALOR COBRADO [5]', 'VALOR PAGO [7]', 'DIFERENÇA [8]']:
+                df_tela[col] = df_tela[col].apply(lambda x: f"R$ {x:,.2f}".replace(',', 'X').replace('.', ',').replace('X', '.') if x != 0 else "")
+
             aba_resumo, aba_detalhada = st.tabs(["📄 Resumo de Restituição", "📊 Planilha Completa"])
             
             with aba_resumo:
                 if not df_restituicao.empty:
                     ano_ini, ano_fim_res = df_restituicao['PERIODO_DT'].min().year, df_restituicao['PERIODO_DT'].max().year
-                    mes_ini_str, mes_fim_str = df_restituicao['PERIODO_DT'].min().strftime('%B/%Y').upper(), df_restituicao['PERIODO_DT'].max().strftime('%B/%Y').upper()
+                    
+                    # Usa o dicionário para garantir português
+                    mes_ini_str = f"{MESES_COMPLETO[df_restituicao['PERIODO_DT'].min().month]}/{ano_ini}"
+                    mes_fim_str = f"{MESES_COMPLETO[df_restituicao['PERIODO_DT'].max().month]}/{ano_fim_res}"
                     
                     st.markdown(f"### OS VALORES DO TOTAL CORRESPONDEM AO PERIODO DE {ano_ini} A {ano_fim_res}")
                     st.markdown(f"## TOTAL: R$ {soma_diferenca:,.2f}".replace(',', 'X').replace('.', ',').replace('X', '.'))
@@ -287,8 +294,7 @@ if df_fipe_global is not None:
                     c4.write(f"R$ {soma_diferenca:,.2f}".replace(',', 'X').replace('.', ',').replace('X', '.'))
 
             with aba_detalhada:
-                df_display = df_raw.copy().drop(columns=['PERIODO_DT'])
-                st.dataframe(df_display, use_container_width=True)
+                st.dataframe(df_tela, use_container_width=True)
                 
                 output = BytesIO()
                 with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
@@ -297,7 +303,6 @@ if df_fipe_global is not None:
                     
                     bold_fmt = workbook.add_format({'bold': True})
                     money_fmt = workbook.add_format({'num_format': 'R$ #,##0.00'})
-                    perc_fmt = workbook.add_format({'num_format': '0.00%'})
                     
                     worksheet.write('A1', 'PLANILHA DE CALCULO', bold_fmt)
                     worksheet.write('A3', 'PARTE AUTORA')
@@ -306,14 +311,18 @@ if df_fipe_global is not None:
                     worksheet.write('D4', parte_re)
                     worksheet.write('A6', f'PLANILHA DE CÁLCULOS - {parte_autora.upper()}', bold_fmt)
                     
-                    colunas = df_display.columns.tolist()
+                    colunas = df_raw.copy().drop(columns=['PERIODO_DT']).columns.tolist()
                     for col_num, value in enumerate(colunas):
                         worksheet.write(7, col_num, value, bold_fmt)
                         
-                    for row_num, row_data in enumerate(df_display.values):
+                    df_excel_bruto = df_raw.copy().drop(columns=['PERIODO_DT'])
+                    
+                    for row_num, row_data in enumerate(df_excel_bruto.values):
                         for col_num, cell_data in enumerate(row_data):
                             if col_num in [1, 3]: 
-                                worksheet.write(row_num + 8, col_num, cell_data, perc_fmt)
+                                # Forçando a conversão da porcentagem em texto brasileiro (ex: 13,50%) para o Excel
+                                txt_perc = f"{cell_data*100:,.2f}%".replace('.', ',') if cell_data > 0 else ""
+                                worksheet.write(row_num + 8, col_num, txt_perc)
                             elif col_num in [2, 4, 6, 7]: 
                                 worksheet.write(row_num + 8, col_num, cell_data, money_fmt)
                             else:
@@ -322,7 +331,7 @@ if df_fipe_global is not None:
                     worksheet.set_column('A:A', 15)
                     worksheet.set_column('B:I', 20)
                     
-                    last_row = 7 + len(df_display)
+                    last_row = 7 + len(df_excel_bruto)
                     if not df_restituicao.empty:
                         worksheet.write(last_row + 2, 3, f"OS VALORES DO TOTAL CORRESPONDEM AO PERIODO DE {ano_ini} A {ano_fim_res}", bold_fmt)
                         worksheet.write(last_row + 3, 3, 'TOTAL', bold_fmt)
