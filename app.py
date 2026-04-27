@@ -146,20 +146,37 @@ with st.sidebar:
         elif not arquivos_enviados:
             st.error("Nenhum arquivo enviado.")
         else:
-            with st.spinner("A IA está lendo os documentos..."):
+            with st.spinner("Conectando ao Google e rastreando IAs ativas..."):
                 try:
                     genai.configure(api_key=api_key)
                     
-                    # CAÇADOR AUTOMÁTICO DE IAs
-                    # Ele pergunta ao Google qual modelo está disponível e escolhe o correto.
-                    nome_modelo_ia = "gemini-1.5-flash" # Fallback
-                    for m in genai.list_models():
-                        if 'generateContent' in m.supported_generation_methods and '1.5-flash' in m.name:
-                            nome_modelo_ia = m.name.replace("models/", "")
+                    # 1. Busca todas as IAs que você tem direito de usar
+                    modelos_disponiveis = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
+                    
+                    if not modelos_disponiveis:
+                        st.error("Sua chave não retornou nenhum modelo disponível. Verifique se o Google AI Studio está ativo.")
+                        st.stop()
+                        
+                    # 2. O Radar escolhe o modelo mais moderno automaticamente (ex: Gemini 2.0, 1.5, etc.)
+                    nome_modelo_ia = None
+                    termos_modernos = ["gemini-2", "gemini-1.5", "gemini-flash", "gemini-pro"]
+                    
+                    for termo in termos_modernos:
+                        for m_name in modelos_disponiveis:
+                            if termo in m_name:
+                                nome_modelo_ia = m_name
+                                break
+                        if nome_modelo_ia:
                             break
                             
-                    modelo = genai.GenerativeModel(nome_modelo_ia)
+                    if not nome_modelo_ia:
+                        nome_modelo_ia = modelos_disponiveis[0] # Se não achar os nomes acima, pega o primeiro que funcionar
+                        
+                    nome_limpo = nome_modelo_ia.replace("models/", "")
+                    modelo = genai.GenerativeModel(nome_limpo)
+                    st.info(f"Usando motor de IA detectado: {nome_limpo}")
                     
+                    # 3. Processa os arquivos
                     arquivos_para_ia = []
                     for arquivo in arquivos_enviados:
                         with tempfile.NamedTemporaryFile(delete=False, suffix=f".{arquivo.name.split('.')[-1]}") as temp_file:
@@ -204,9 +221,11 @@ with st.sidebar:
                         df_temp.columns = ["Mês/Ano (MM/AAAA)", "Valor Cobrado (R$)"]
                         st.session_state.df_valores_iniciais = df_temp
                     
-                    st.success(f"✅ Sucesso! Usando a IA: {nome_modelo_ia}")
+                    st.success("✅ Documentos lidos com sucesso! Verifique o preenchimento automático.")
                 except Exception as e:
-                    st.error(f"Erro na IA: {e}")
+                    st.error(f"Ocorreu um erro no motor de IA: {e}")
+                    st.write("IAs disponíveis encontradas na sua chave:")
+                    st.write(modelos_disponiveis) # Isso vai te mostrar exatamente quais nomes o Google liberou pra você!
 
 # --- TELA PRINCIPAL ---
 st.title("⚖️ Sistema Revisional Inteligente - Planos de Saúde")
