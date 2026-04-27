@@ -132,7 +132,6 @@ def calcular_revisao_automatica(data_inicio, data_fim, data_nasc, valor_inicial,
         
     return pd.DataFrame(meses_calculo), reajustes_idade_descobertos
 
-# --- MENU LATERAL: INTELIGÊNCIA ARTIFICIAL ---
 with st.sidebar:
     st.header("🤖 Leitura Automática (IA)")
     api_key = st.text_input("Cole sua Chave API do Gemini", type="password")
@@ -149,34 +148,25 @@ with st.sidebar:
             with st.spinner("Conectando ao Google e rastreando IAs ativas..."):
                 try:
                     genai.configure(api_key=api_key)
-                    
-                    # 1. Busca todas as IAs que você tem direito de usar
                     modelos_disponiveis = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
-                    
                     if not modelos_disponiveis:
-                        st.error("Sua chave não retornou nenhum modelo disponível. Verifique se o Google AI Studio está ativo.")
+                        st.error("Sua chave não retornou nenhum modelo disponível.")
                         st.stop()
                         
-                    # 2. O Radar escolhe o modelo mais moderno automaticamente (ex: Gemini 2.0, 1.5, etc.)
                     nome_modelo_ia = None
                     termos_modernos = ["gemini-2", "gemini-1.5", "gemini-flash", "gemini-pro"]
-                    
                     for termo in termos_modernos:
                         for m_name in modelos_disponiveis:
                             if termo in m_name:
                                 nome_modelo_ia = m_name
                                 break
-                        if nome_modelo_ia:
-                            break
+                        if nome_modelo_ia: break
                             
-                    if not nome_modelo_ia:
-                        nome_modelo_ia = modelos_disponiveis[0] # Se não achar os nomes acima, pega o primeiro que funcionar
-                        
+                    if not nome_modelo_ia: nome_modelo_ia = modelos_disponiveis[0]
                     nome_limpo = nome_modelo_ia.replace("models/", "")
                     modelo = genai.GenerativeModel(nome_limpo)
-                    st.info(f"Usando motor de IA detectado: {nome_limpo}")
+                    st.info(f"Usando motor de IA: {nome_limpo}")
                     
-                    # 3. Processa os arquivos
                     arquivos_para_ia = []
                     for arquivo in arquivos_enviados:
                         with tempfile.NamedTemporaryFile(delete=False, suffix=f".{arquivo.name.split('.')[-1]}") as temp_file:
@@ -206,7 +196,6 @@ with st.sidebar:
                     """
                     
                     resposta_ia = modelo.generate_content([prompt_ia] + arquivos_para_ia)
-                    
                     for a in arquivos_para_ia: genai.delete_file(a.name)
                     
                     texto_json = resposta_ia.text.replace("```json", "").replace("```", "").strip()
@@ -221,13 +210,10 @@ with st.sidebar:
                         df_temp.columns = ["Mês/Ano (MM/AAAA)", "Valor Cobrado (R$)"]
                         st.session_state.df_valores_iniciais = df_temp
                     
-                    st.success("✅ Documentos lidos com sucesso! Verifique o preenchimento automático.")
+                    st.success("✅ Documentos lidos com sucesso!")
                 except Exception as e:
                     st.error(f"Ocorreu um erro no motor de IA: {e}")
-                    st.write("IAs disponíveis encontradas na sua chave:")
-                    st.write(modelos_disponiveis) # Isso vai te mostrar exatamente quais nomes o Google liberou pra você!
 
-# --- TELA PRINCIPAL ---
 st.title("⚖️ Sistema Revisional Inteligente - Planos de Saúde")
 df_fipe_global = obter_fipe_saude()
 
@@ -236,14 +222,15 @@ if df_fipe_global is not None:
     col1, col2 = st.columns(2)
     with col1:
         parte_autora = st.text_input("Parte Autora", value=st.session_state.parte_autora)
-        data_nascimento = st.date_input("Data de Nascimento do Titular", format="DD/MM/YYYY", value=datetime.date(1970, 1, 1))
-        data_inicio = st.date_input("Data de Início do Cálculo", format="DD/MM/YYYY")
+        # CORREÇÃO APLICADA: min_value configurado para o ano de 1900
+        data_nascimento = st.date_input("Data de Nascimento do Titular", format="DD/MM/YYYY", value=datetime.date(1970, 1, 1), min_value=datetime.date(1900, 1, 1), max_value=datetime.date.today())
+        data_inicio = st.date_input("Data de Início do Cálculo", format="DD/MM/YYYY", min_value=datetime.date(1990, 1, 1), max_value=datetime.date.today())
         mes_reajuste = st.number_input("Mês de Reajuste (Aniversário)", min_value=1, max_value=12, value=7)
     with col2:
         parte_re = st.text_input("Parte Ré (Ex: CASSI)")
-        data_fim = st.date_input("Data Fim do Cálculo", format="DD/MM/YYYY")
+        data_fim = st.date_input("Data Fim do Cálculo", format="DD/MM/YYYY", min_value=datetime.date(1990, 1, 1))
         valor_inicial = st.number_input("Valor Inicial (Primeiro Mês R$)", min_value=0.0, value=st.session_state.valor_inicial, format="%.2f")
-        data_base_prescricao = st.date_input("Data para Prescrição (3 anos p/ trás)", format="DD/MM/YYYY", value=datetime.date.today())
+        data_base_prescricao = st.date_input("Data para Prescrição (3 anos p/ trás)", format="DD/MM/YYYY", value=datetime.date.today(), min_value=datetime.date(1990, 1, 1))
 
     st.markdown("---")
     st.header("2. Evolução dos Boletos (Preenchimento Automático ou Manual)")
