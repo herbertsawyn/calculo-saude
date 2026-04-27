@@ -23,7 +23,6 @@ if 'data_inicio' not in st.session_state: st.session_state.data_inicio = datetim
 if 'df_valores_iniciais' not in st.session_state: 
     st.session_state.df_valores_iniciais = pd.DataFrame({"Mês/Ano (MM/AAAA)": [""], "Valor Cobrado (R$)": [0.0]})
 
-# Inicia as caixinhas de faixa etária na memória para não dar erro
 for f_id in range(2, 11):
     if f'd_{f_id}' not in st.session_state:
         st.session_state[f'd_{f_id}'] = 0.0
@@ -85,6 +84,7 @@ def calcular_revisao_automatica(data_inicio, data_fim, data_nasc, valor_inicial,
         faixa_atual = obter_faixa_etaria(idade_atual)
         faixa_anterior = obter_faixa_etaria(idade_anterior)
         
+        # 1. Valor Cobrado (Lógica linha a linha)
         if chave_mes_ano in dict_valores_informados:
             novo_valor = dict_valores_informados[chave_mes_ano]
             if novo_valor > 0 and abs(novo_valor - valor_cobrado) > 0.05: 
@@ -106,6 +106,7 @@ def calcular_revisao_automatica(data_inicio, data_fim, data_nasc, valor_inicial,
             if faixa_atual > faixa_anterior:
                 motivo_reajuste = f"Mudou Faixa ({faixa_atual}) - Sem aumento"
 
+        # 2. Valor Devido (Lógica linha a linha - Mensalidade Anterior * (1 + % FIPE))
         if faixa_atual > faixa_anterior and idade_atual < 60:
             perc_idade_dev = reajustes_idade_devido.get(faixa_atual, 0.0)
             valor_devido *= (1 + perc_idade_dev)
@@ -123,9 +124,9 @@ def calcular_revisao_automatica(data_inicio, data_fim, data_nasc, valor_inicial,
                 perc_fipe_acumulado = fatores.prod() - 1
                 valor_devido *= (1 + perc_fipe_acumulado)
         
+        # 3. Diferença
         diferenca = valor_cobrado - valor_devido
         
-        # Uso do tradutor para o mês
         periodo_str = f"{MESES_ABREV[data_atual.month]}/{data_atual.strftime('%y')}"
         
         meses_calculo.append({
@@ -159,7 +160,6 @@ with st.sidebar:
                 try:
                     genai.configure(api_key=api_key)
                     modelos = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
-                    
                     nome_modelo = next((m for termo in ["gemini-1.5-flash", "gemini-2", "gemini-flash"] for m in modelos if termo in m), modelos[0])
                     modelo = genai.GenerativeModel(nome_modelo.replace("models/", ""))
                     
@@ -237,9 +237,6 @@ if df_fipe_global is not None:
     df_valores_editado = st.data_editor(st.session_state.df_valores_iniciais, num_rows="dynamic", use_container_width=True, column_config={"Valor Cobrado (R$)": st.column_config.NumberColumn("Valor Cobrado (R$)", format="R$ %.2f", min_value=0.0)})
 
     st.header("3. Parâmetros Legais (Devido)")
-    if "CASSI" in tipo_contrato:
-        st.info(f"Percentuais {tipo_contrato} carregados automaticamente.")
-
     reajustes_idade_devido = {}
     faixas = [(2, "19 a 23"), (3, "24 a 28"), (4, "29 a 33"), (5, "34 a 38"), (6, "39 a 43"), (7, "44 a 48"), (8, "49 a 53"), (9, "54 a 58"), (10, "59+")]
     cols_f = st.columns(5)
@@ -250,18 +247,29 @@ if df_fipe_global is not None:
             if dev > 0: reajustes_idade_devido[f_id] = dev / 100
 
     if st.button("Gerar Cálculo Revisional", type="primary", use_container_width=True):
-        with st.spinner('Construindo planilha rigorosa...'):
+        with st.spinner('Aplicando Sum Group By Year e gerando planilha...'):
             dict_valores = {str(r["Mês/Ano (MM/AAAA)"]).strip(): float(r["Valor Cobrado (R$)"]) for i, r in df_valores_editado.iterrows() if str(r["Mês/Ano (MM/AAAA)"]).strip() != "nan" and float(r["Valor Cobrado (R$)"]) > 0}
 
             df_raw, idades_desc = calcular_revisao_automatica(data_inicio, data_fim, data_nascimento, valor_inicial, mes_reajuste, dict_valores, reajustes_idade_devido, df_fipe_global)
             
             limite_3_anos = pd.to_datetime(data_base_prescricao) - relativedelta(years=3)
             df_restituicao = df_raw[df_raw['PERIODO_DT'] >= limite_3_anos]
+            
+            # --- AGRUPAMENTO SUM GROUP BY YEAR ---
+            resumo_anual = []
+            if not df_restituicao.empty:
+                for ano, df_ano in df_restituicao.groupby(df_restituicao['PERIODO_DT'].dt.year):
+                    meses = len(df_ano)
+                    t_pago = df_ano['VALOR PAGO [7]'].sum()
+                    t_devido = df_ano['VALOR DEVIDO [3]'].sum()
+                    t_dif = df_ano['DIFERENÇA [8]'].sum()
+                    resumo_anual.append([f"Ano {ano} ({meses} meses)", t_pago, t_devido, t_dif])
+                    
             soma_cobrado = df_restituicao['VALOR PAGO [7]'].sum() if not df_restituicao.empty else 0
             soma_devido = df_restituicao['VALOR DEVIDO [3]'].sum() if not df_restituicao.empty else 0
             soma_diferenca = df_restituicao['DIFERENÇA [8]'].sum() if not df_restituicao.empty else 0
 
-            # --- PREPARAÇÃO DA TABELA PARA A TELA (FORMATADA BONITA) ---
+            # --- PREPARAÇÃO DA TABELA PARA A TELA ---
             df_tela = df_raw.copy().drop(columns=['PERIODO_DT'])
             for col in ['% FIPE SAUDE [2]', '% DO PLANO [4]']:
                 df_tela[col] = df_tela[col].apply(lambda x: f"{x*100:,.2f}%".replace('.', ',') if x > 0 else "")
@@ -273,13 +281,11 @@ if df_fipe_global is not None:
             with aba_resumo:
                 if not df_restituicao.empty:
                     ano_ini, ano_fim_res = df_restituicao['PERIODO_DT'].min().year, df_restituicao['PERIODO_DT'].max().year
-                    
-                    # Usa o dicionário para garantir português
                     mes_ini_str = f"{MESES_COMPLETO[df_restituicao['PERIODO_DT'].min().month]}/{ano_ini}"
                     mes_fim_str = f"{MESES_COMPLETO[df_restituicao['PERIODO_DT'].max().month]}/{ano_fim_res}"
                     
                     st.markdown(f"### OS VALORES DO TOTAL CORRESPONDEM AO PERIODO DE {ano_ini} A {ano_fim_res}")
-                    st.markdown(f"## TOTAL: R$ {soma_diferenca:,.2f}".replace(',', 'X').replace('.', ',').replace('X', '.'))
+                    st.markdown(f"## TOTAL DA CAUSA: R$ {soma_diferenca:,.2f}".replace(',', 'X').replace('.', ',').replace('X', '.'))
                     st.markdown("---")
                     st.markdown(f"#### RESUMO DE RESTITUIÇÃO {mes_ini_str} A {mes_fim_str}")
                     
@@ -287,11 +293,19 @@ if df_fipe_global is not None:
                     c1.write("**PERIODO EM ANOS**")
                     c2.write("**VALORES PAGO**")
                     c3.write("**VALORES DEVIDO**")
-                    c4.write("**DIFERENÇA**")
-                    c1.write("Últimos 3 Anos")
-                    c2.write(f"R$ {soma_cobrado:,.2f}".replace(',', 'X').replace('.', ',').replace('X', '.'))
-                    c3.write(f"R$ {soma_devido:,.2f}".replace(',', 'X').replace('.', ',').replace('X', '.'))
-                    c4.write(f"R$ {soma_diferenca:,.2f}".replace(',', 'X').replace('.', ',').replace('X', '.'))
+                    c4.write("**DIFERENÇAS**")
+                    
+                    for item in resumo_anual:
+                        c1.write(item[0])
+                        c2.write(f"R$ {item[1]:,.2f}".replace(',', 'X').replace('.', ',').replace('X', '.'))
+                        c3.write(f"R$ {item[2]:,.2f}".replace(',', 'X').replace('.', ',').replace('X', '.'))
+                        c4.write(f"R$ {item[3]:,.2f}".replace(',', 'X').replace('.', ',').replace('X', '.'))
+                        
+                    st.markdown("---")
+                    c1.write("**Últimos 3 Anos (Total)**")
+                    c2.write(f"**R$ {soma_cobrado:,.2f}**".replace(',', 'X').replace('.', ',').replace('X', '.'))
+                    c3.write(f"**R$ {soma_devido:,.2f}**".replace(',', 'X').replace('.', ',').replace('X', '.'))
+                    c4.write(f"**R$ {soma_diferenca:,.2f}**".replace(',', 'X').replace('.', ',').replace('X', '.'))
 
             with aba_detalhada:
                 st.dataframe(df_tela, use_container_width=True)
@@ -320,7 +334,6 @@ if df_fipe_global is not None:
                     for row_num, row_data in enumerate(df_excel_bruto.values):
                         for col_num, cell_data in enumerate(row_data):
                             if col_num in [1, 3]: 
-                                # Forçando a conversão da porcentagem em texto brasileiro (ex: 13,50%) para o Excel
                                 txt_perc = f"{cell_data*100:,.2f}%".replace('.', ',') if cell_data > 0 else ""
                                 worksheet.write(row_num + 8, col_num, txt_perc)
                             elif col_num in [2, 4, 6, 7]: 
@@ -344,10 +357,17 @@ if df_fipe_global is not None:
                         worksheet.write(r_row, 1, 'PERIODO EM ANOS', bold_fmt)
                         worksheet.write(r_row, 4, 'VALORES PAGO', bold_fmt)
                         worksheet.write(r_row, 6, 'VALORES DEVIDO', bold_fmt)
-                        worksheet.write(r_row, 8, 'DIFERENÇA', bold_fmt)
+                        worksheet.write(r_row, 8, 'DIFERENÇAS', bold_fmt)
                         
                         r_row += 1
-                        worksheet.write(r_row, 1, 'Últimos 3 Anos')
+                        for item in resumo_anual:
+                            worksheet.write(r_row, 1, item[0])
+                            worksheet.write(r_row, 4, item[1], money_fmt)
+                            worksheet.write(r_row, 6, item[2], money_fmt)
+                            worksheet.write(r_row, 8, item[3], money_fmt)
+                            r_row += 1
+                            
+                        worksheet.write(r_row, 1, 'Últimos 3 Anos', bold_fmt)
                         worksheet.write(r_row, 4, soma_cobrado, money_fmt)
                         worksheet.write(r_row, 6, soma_devido, money_fmt)
                         worksheet.write(r_row, 8, soma_diferenca, money_fmt)
