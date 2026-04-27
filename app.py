@@ -151,7 +151,7 @@ with st.sidebar:
             with st.spinner("A IA está lendo os documentos..."):
                 try:
                     genai.configure(api_key=api_key)
-                    modelo = genai.GenerativeModel("gemini-1.5-flash")
+                    modelo = genai.GenerativeModel("gemini-1.5-flash-latest")
                     
                     arquivos_para_ia = []
                     for arquivo in arquivos_enviados:
