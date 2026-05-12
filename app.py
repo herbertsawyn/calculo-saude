@@ -3,6 +3,7 @@ import pandas as pd
 import requests
 from io import BytesIO
 import datetime
+import time
 from dateutil.relativedelta import relativedelta
 import google.generativeai as genai
 import json
@@ -84,7 +85,6 @@ def calcular_revisao_automatica(data_inicio, data_fim, data_nasc, valor_inicial,
         faixa_atual = obter_faixa_etaria(idade_atual)
         faixa_anterior = obter_faixa_etaria(idade_anterior)
         
-        # 1. Valor Cobrado (Lógica linha a linha)
         if chave_mes_ano in dict_valores_informados:
             novo_valor = dict_valores_informados[chave_mes_ano]
             if novo_valor > 0 and abs(novo_valor - valor_cobrado) > 0.05: 
@@ -106,7 +106,6 @@ def calcular_revisao_automatica(data_inicio, data_fim, data_nasc, valor_inicial,
             if faixa_atual > faixa_anterior:
                 motivo_reajuste = f"Mudou Faixa ({faixa_atual}) - Sem aumento"
 
-        # 2. Valor Devido (Lógica linha a linha - Mensalidade Anterior * (1 + % FIPE))
         if faixa_atual > faixa_anterior and idade_atual < 60:
             perc_idade_dev = reajustes_idade_devido.get(faixa_atual, 0.0)
             valor_devido *= (1 + perc_idade_dev)
@@ -124,9 +123,7 @@ def calcular_revisao_automatica(data_inicio, data_fim, data_nasc, valor_inicial,
                 perc_fipe_acumulado = fatores.prod() - 1
                 valor_devido *= (1 + perc_fipe_acumulado)
         
-        # 3. Diferença
         diferenca = valor_cobrado - valor_devido
-        
         periodo_str = f"{MESES_ABREV[data_atual.month]}/{data_atual.strftime('%y')}"
         
         meses_calculo.append({
@@ -146,7 +143,7 @@ def calcular_revisao_automatica(data_inicio, data_fim, data_nasc, valor_inicial,
         
     return pd.DataFrame(meses_calculo), reajustes_idade_descobertos
 
-# --- MENU LATERAL: IA ---
+# --- MENU LATERAL: IA BLINDADA ---
 with st.sidebar:
     st.header("🤖 Assistente de IA")
     api_key = st.text_input("Sua Chave API do Gemini", type="password")
@@ -154,9 +151,10 @@ with st.sidebar:
     arquivos_enviados = st.file_uploader("Documentos", accept_multiple_files=True, type=['pdf', 'png', 'jpg'])
     
     if st.button("Processar Dados com IA", type="primary", use_container_width=True):
-        if not api_key: st.error("Insira a chave da API.")
+        if not api_key: 
+            st.error("Insira a chave da API.")
         else:
-            with st.spinner("Processando..."):
+            with st.spinner("Conectando ao motor de IA..."):
                 try:
                     genai.configure(api_key=api_key)
                     modelos = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
@@ -174,23 +172,51 @@ with st.sidebar:
                         arquivos_temp.append(subido)
                         os.unlink(t_path)
                     
-                    resp = modelo.generate_content(conteudo)
+                    # --- SISTEMA DE TENTATIVAS AUTOMÁTICAS (AUTO-RETRY) ---
+                    sucesso = False
+                    erro_capturado = None
+                    resp = None
+                    
+                    for tentativa in range(3):
+                        try:
+                            if tentativa > 0:
+                                # Atualiza a mensagem visual se estiver tentando novamente
+                                st.toast(f"Servidor ocupado. Tentativa {tentativa+1} de 3 de reconexão automática...")
+                                time.sleep(4) # Pausa estratégica para o servidor do Google respirar
+                                
+                            resp = modelo.generate_content(conteudo)
+                            sucesso = True
+                            break # Deu certo, sai do loop de tentativas
+                        except Exception as e:
+                            erro_capturado = e
+                            # Se for instabilidade (503) ou cota rápida (429), permite tentar de novo
+                            if "503" in str(e) or "429" in str(e):
+                                continue
+                            else:
+                                break # Outros erros de senha ou formato param imediatamente
+                                
+                    # Limpeza dos arquivos temporários nos servidores do Google
                     for a in arquivos_temp: genai.delete_file(a.name)
                     
-                    dados = json.loads(resp.text.replace("```json", "").replace("```", "").strip())
-                    if dados.get('parte_autora'): st.session_state.parte_autora = dados['parte_autora']
-                    if dados.get('valor_primeiro_boleto'): st.session_state.valor_inicial = float(dados['valor_primeiro_boleto'])
-                    try:
-                        if dados.get('data_nascimento'): st.session_state.data_nascimento = datetime.datetime.strptime(dados['data_nascimento'], "%d/%m/%Y").date()
-                        if dados.get('data_inicio'): st.session_state.data_inicio = datetime.datetime.strptime(dados['data_inicio'], "%d/%m/%Y").date()
-                    except: pass
-                    
-                    if dados.get('boletos'):
-                        df_t = pd.DataFrame(dados['boletos'])
-                        df_t.columns = ["Mês/Ano (MM/AAAA)", "Valor Cobrado (R$)"]
-                        st.session_state.df_valores_iniciais = df_t
-                    st.success("✅ IA processou os dados!")
-                except Exception as e: st.error(f"Erro IA: {e}")
+                    if sucesso and resp:
+                        dados = json.loads(resp.text.replace("```json", "").replace("```", "").strip())
+                        if dados.get('parte_autora'): st.session_state.parte_autora = dados['parte_autora']
+                        if dados.get('valor_primeiro_boleto'): st.session_state.valor_inicial = float(dados['valor_primeiro_boleto'])
+                        try:
+                            if dados.get('data_nascimento'): st.session_state.data_nascimento = datetime.datetime.strptime(dados['data_nascimento'], "%d/%m/%Y").date()
+                            if dados.get('data_inicio'): st.session_state.data_inicio = datetime.datetime.strptime(dados['data_inicio'], "%d/%m/%Y").date()
+                        except: pass
+                        
+                        if dados.get('boletos'):
+                            df_t = pd.DataFrame(dados['boletos'])
+                            df_t.columns = ["Mês/Ano (MM/AAAA)", "Valor Cobrado (R$)"]
+                            st.session_state.df_valores_iniciais = df_t
+                        st.success("✅ IA processou os dados com sucesso!")
+                    else:
+                        st.error(f"O servidor do Google permaneceu indisponível após 3 tentativas. Tente novamente em 1 minuto. Detalhe técnico: {erro_capturado}")
+                        
+                except Exception as e: 
+                    st.error(f"Erro na configuração da IA: {e}")
 
 def aplicar_tabela_cassi():
     if "CASSI" in st.session_state.tipo_contrato_select:
@@ -255,7 +281,6 @@ if df_fipe_global is not None:
             limite_3_anos = pd.to_datetime(data_base_prescricao) - relativedelta(years=3)
             df_restituicao = df_raw[df_raw['PERIODO_DT'] >= limite_3_anos]
             
-            # --- AGRUPAMENTO SUM GROUP BY YEAR ---
             resumo_anual = []
             if not df_restituicao.empty:
                 for ano, df_ano in df_restituicao.groupby(df_restituicao['PERIODO_DT'].dt.year):
@@ -269,7 +294,6 @@ if df_fipe_global is not None:
             soma_devido = df_restituicao['VALOR DEVIDO [3]'].sum() if not df_restituicao.empty else 0
             soma_diferenca = df_restituicao['DIFERENÇA [8]'].sum() if not df_restituicao.empty else 0
 
-            # --- PREPARAÇÃO DA TABELA PARA A TELA ---
             df_tela = df_raw.copy().drop(columns=['PERIODO_DT'])
             for col in ['% FIPE SAUDE [2]', '% DO PLANO [4]']:
                 df_tela[col] = df_tela[col].apply(lambda x: f"{x*100:,.2f}%".replace('.', ',') if x > 0 else "")
@@ -373,4 +397,3 @@ if df_fipe_global is not None:
                         worksheet.write(r_row, 8, soma_diferenca, money_fmt)
 
                 st.download_button("📥 Baixar Excel do Modelo Oficial", data=output.getvalue(), file_name=f"Calculo_{parte_autora}.xlsx")
-                
